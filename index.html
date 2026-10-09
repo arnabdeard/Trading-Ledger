@@ -622,8 +622,8 @@ function renderCalendar(){
   const maxAbs = Math.max(1, ...Object.values(daily).map(d=>Math.abs(d.net)));
 
   const daysInMonth = new Date(y, m, 0).getDate();
-  const offset = (new Date(y, m-1, 1).getDay() + 6) % 7; // Monday first
-  let html = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d=>`<div class="cal-dow">${d}</div>`).join('');
+  const offset = new Date(y, m-1, 1).getDay(); // Sunday first
+  let html = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d=>`<div class="cal-dow">${d}</div>`).join('');
   for(let i=0;i<offset;i++) html += '<div class="cal-cell blank"></div>';
 
   let monthNet = 0, monthTrades = 0;
@@ -832,6 +832,59 @@ function renderCharts(s){
     }
   };
   Chart.register(glowPlugin);
+  const equityDot = {
+    id:'equityDot',
+    afterDatasetsDraw(chart){
+      if(chart.canvas.id!=='equityChart') return;
+      const pts = chart.getDatasetMeta(0).data;
+      const n = pts.length;
+      if(n<2) return;
+      const travel = Math.min(10, Math.max(5, (n-1)*1.2)) * 1000;
+      const cycle = travel;
+      const elapsed = (performance.now() - EQ_START) % cycle;
+      const p = Math.min(1, elapsed/travel);
+      const f = p*(n-1);
+      const i = Math.min(n-2, Math.floor(f));
+      const u = f - i;
+      const a = pts[i], b = pts[i+1];
+      let x, y;
+      if(a.cp2x!==undefined && b.cp1x!==undefined && !isNaN(a.cp2x) && !isNaN(b.cp1x)){
+        const v = 1-u;
+        x = v*v*v*a.x + 3*v*v*u*a.cp2x + 3*v*u*u*b.cp1x + u*u*u*b.x;
+        y = v*v*v*a.y + 3*v*v*u*a.cp2y + 3*v*u*u*b.cp1y + u*u*u*b.y;
+      } else {
+        x = a.x + (b.x-a.x)*u; y = a.y + (b.y-a.y)*u;
+      }
+      const ctx = chart.ctx;
+      const fade = Math.min(0.2, 500/travel); // fade in/out over ~0.5s at each end
+      const alpha = Math.max(0, Math.min(1, p/fade, (1-p)/fade));
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.shadowColor = 'rgba(255,214,0,1)';
+      ctx.shadowBlur = 22;
+      ctx.fillStyle = 'rgba(255,214,0,0.35)';
+      ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI*2); ctx.fill();
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = '#FFE680';
+      ctx.beginPath(); ctx.arc(x, y, 4.5, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+  };
+  Chart.register(equityDot);
+  const equityGlow = {
+    id:'equityGlow',
+    beforeDatasetDraw(chart){
+      if(chart.canvas.id!=='equityChart') return;
+      chart.ctx.save();
+      chart.ctx.shadowColor = 'rgba(255,214,0,0.95)';
+      chart.ctx.shadowBlur = 24;
+    },
+    afterDatasetDraw(chart){
+      if(chart.canvas.id!=='equityChart') return;
+      chart.ctx.restore();
+    }
+  };
+  Chart.register(equityGlow);
 
   // Equity curve
   const chrono = [...trades].sort((a,b)=> new Date(a.date)-new Date(b.date));
@@ -854,14 +907,18 @@ function renderCharts(s){
 
   // Pie win/loss
   if(pieChart) pieChart.destroy();
+  const hasPie = (s.wins.length + s.losses.length) > 0;
   pieChart = new Chart(document.getElementById('pieChart'), {
     type:'doughnut',
-    data:{ labels:['Wins','Losses'], datasets:[{
+    data: hasPie ? { labels:['Wins','Losses'], datasets:[{
       data:[s.wins.length, s.losses.length],
-      backgroundColor:['#00F0FF','#FF3B3B'], borderColor:'#121B2E', borderWidth:3
+      backgroundColor:['#00F0FF','#FF3B3B'], borderWidth:0
+    }]} : { labels:['No trades yet'], datasets:[{
+      data:[1], backgroundColor:['rgba(255,255,255,0.07)'], borderWidth:0
     }]},
     options:{ responsive:true, maintainAspectRatio:false,
-      plugins:{legend:{position:'bottom', labels:{boxWidth:10,padding:14}}}
+      animation:{ animateRotate:false },
+      plugins:{legend:{position:'bottom', labels:{boxWidth:10,padding:14}}, tooltip:{enabled:hasPie}}
     }
   });
 
@@ -1021,6 +1078,50 @@ document.getElementById('importFile').addEventListener('change', (e)=>{
 });
 
 document.getElementById('fDate').valueAsDate = new Date();
+// Win/Loss wheel: continuous spin at 5 rotations per minute (one turn every 12 s)
+const SPIN_RPM = 5;
+const EQ_START = performance.now(); // equity-curve dot timeline
+(function spinWheel(){
+  const start = performance.now();
+  const canvas = document.getElementById('pieChart');
+  // The wheel moves under a still cursor, so hover is re-checked every frame
+  const pointer = {x:0, y:0, inside:false};
+  let hovering = false;
+  function setPointer(clientX, clientY){
+    const r = canvas.getBoundingClientRect();
+    pointer.x = clientX - r.left; pointer.y = clientY - r.top; pointer.inside = true;
+  }
+  canvas.addEventListener('mousemove', e=>setPointer(e.clientX, e.clientY));
+  canvas.addEventListener('mouseleave', ()=>{ pointer.inside = false; });
+  canvas.addEventListener('touchstart', e=>{ const t=e.touches[0]; if(t) setPointer(t.clientX, t.clientY); }, {passive:true});
+  canvas.addEventListener('touchmove', e=>{ const t=e.touches[0]; if(t) setPointer(t.clientX, t.clientY); }, {passive:true});
+  canvas.addEventListener('touchend', ()=>{ pointer.inside = false; });
+
+  function frame(now){
+    if(pieChart && pieChart.options){
+      const deg = ((now-start) / 60000 * SPIN_RPM * 360) % 360;
+      pieChart.options.rotation = deg;
+      pieChart.update('none');
+      if(pointer.inside){
+        const els = pieChart.getElementsAtEventForMode({type:'mousemove', native:true, x:pointer.x, y:pointer.y}, 'nearest', {intersect:true}, true);
+        const act = els.map(e=>({datasetIndex:e.datasetIndex, index:e.index}));
+        pieChart.setActiveElements(act);
+        pieChart.tooltip.setActiveElements(act, {x:pointer.x, y:pointer.y});
+        hovering = true;
+        pieChart.draw();
+      } else if(hovering){
+        pieChart.setActiveElements([]);
+        pieChart.tooltip.setActiveElements([], {x:0, y:0});
+        hovering = false;
+        pieChart.draw();
+      }
+    }
+    if(equityChart && equityChart.ctx) equityChart.draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+
 loadAll();
 </script>
 </body>
